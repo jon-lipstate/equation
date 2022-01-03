@@ -2,23 +2,19 @@ use std::{borrow::Cow, collections::HashMap, num::ParseFloatError};
 
 use nom::{
     branch::alt,
-    bytes::complete::{is_a, take_till, take_while},
+    bytes::complete::{is_a, take_till, take_while, take_while1},
     character::{
         complete::{char, multispace0},
         is_alphabetic, is_alphanumeric,
     },
     combinator::{map, opt, recognize, value},
     error::{ErrorKind, FromExternalError, ParseError},
+    multi,
     number::complete::double,
-    sequence::tuple,
+    sequence::{preceded, tuple},
     IResult, Parser,
 };
 
-#[derive(Debug, Clone)]
-enum UnaryAction {
-    Negate,
-    Sin,
-}
 #[derive(Debug, Clone)]
 enum Action {
     Add,
@@ -55,17 +51,6 @@ impl Action {
         }
     }
 }
-// #[derive(Debug, Clone)]
-// enum GroupSymbol {
-//     Paren,
-//     Curly,
-//     Bracket,
-//     Pipe,
-// }
-
-// enum atomic {
-//     num, ident, action, group
-// }
 
 #[derive(Debug, Clone)]
 enum ExprValue<'i> {
@@ -78,14 +63,15 @@ enum ExprValue<'i> {
 }
 //Number
 fn parse_number<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, f64, E> {
-    match double.parse(input) {
+    let mut number = preceded(multispace0, double);
+
+    match number.parse(input) {
         Ok((tail, val)) => Ok((tail, val)),
-        Err(e) => Err(e), //Err(nom::Err::Error(e)),
+        Err(e) => Err(e),
     }
 }
 fn parse_pi<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, f64, E> {
-    unimplemented!();
-    // value(std::f64::consts::PI, char('π'))
+    value(std::f64::consts::PI, preceded(multispace0, is_a("π"))).parse(input)
 }
 
 //Ident
@@ -97,34 +83,40 @@ fn parse_subscript<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i st
     .parse(input)
 }
 fn parse_variable<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, &'i str, E> {
-    recognize(tuple((
-        alt(
-            //Start
-            (
-                recognize(tuple((
-                    is_a("_"),
-                    take_while(|chr| is_alphanumeric(chr as u8)),
-                ))),
-                recognize(tuple((
-                    take_while(|chr| is_alphabetic(chr as u8)),
-                    opt(take_while(|chr| is_alphanumeric(chr as u8))),
-                ))),
+    preceded(
+        multispace0,
+        recognize(tuple((
+            alt(
+                //Start
+                (
+                    recognize(tuple((
+                        is_a("_"),
+                        take_while1(|chr| is_alphanumeric(chr as u8)),
+                    ))),
+                    recognize(tuple((
+                        take_while1(|chr| is_alphabetic(chr as u8)),
+                        opt(take_while1(|chr| is_alphanumeric(chr as u8))),
+                    ))),
+                ),
             ),
-        ),
-        opt(parse_subscript),
-    )))
+            opt(parse_subscript),
+        ))),
+    )
     .parse(input)
 }
 //Action
 fn parse_action<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, Action, E> {
-    alt((
-        value(Action::Add, char('+')),
-        value(Action::Subtract, char('-')),
-        value(Action::Multiply, char('*')),
-        value(Action::Divide, char('/')),
-        value(Action::Sin, is_a("sin")),
-        // value(Action::Abs, is_a("abs")),
-    ))
+    preceded(
+        multispace0,
+        alt((
+            value(Action::Add, char('+')),
+            value(Action::Subtract, char('-')),
+            value(Action::Multiply, char('*')),
+            value(Action::Divide, char('/')),
+            value(Action::Sin, is_a("sin")),
+            // value(Action::Abs, is_a("abs")),
+        )),
+    )
     .parse(input)
 }
 //Group
@@ -135,10 +127,8 @@ fn parse_group<'i, T, E: ParseError<&'i str>, C>(
     empty_collection: impl Fn() -> C,
     collection_fold: impl Fn(C, T) -> C,
 ) -> impl Parser<&'i str, C, E> {
-    let mut parse_open = tuple((char(open), multispace0));
-    let mut parse_close = tuple((char(close), multispace0));
-    println!("parse_group: fix comma seperator");
-    let mut parse_comma = tuple((char(','), multispace0));
+    let mut parse_open = preceded(multispace0, char(open));
+    let mut parse_close = preceded(multispace0, char(close));
 
     move |input: &'i str| {
         let (mut input, _) = parse_open(input)?;
@@ -162,11 +152,6 @@ fn parse_group<'i, T, E: ParseError<&'i str>, C>(
                 Err(nom::Err::Error(err)) => err,
                 Err(err) => return Err(err),
             };
-            match parse_comma.parse(input) {
-                Ok((tail, _)) => input = tail,
-                Err(nom::Err::Error(err2)) => return Err(nom::Err::Error(err1.or(err2))),
-                Err(err) => return Err(err),
-            }
         } // end loop
     } // end lambda
 }
@@ -181,50 +166,52 @@ fn parse_parens<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFlo
     // return (group, GroupSymbol::Paren);
     group
 }
-//Unary
-fn parse_unary<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
-    input: &'i str,
-) -> IResult<&'i str, (Cow<'i, ExprValue<'i>>, Action), E> {
-    unimplemented!()
-}
-fn parse_binary<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
-    input: &'i str,
-) -> IResult<&'i str, (Cow<'i, ExprValue<'i>>, Cow<'i, ExprValue<'i>>, Action), E> {
-    unimplemented!()
-}
 
 //ExprValue
 fn parse_value<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
     input: &'i str,
 ) -> IResult<&'i str, ExprValue<'i>, E> {
-    // unimplemented!()
-    // let pn: Result<(&str, f64), nom::Err<E>> = parse_number.parse(input);
-
     alt((
+        map(parse_action, ExprValue::Action),
         map(parse_number, ExprValue::Number),
         map(parse_pi, ExprValue::Number),
-        map(parse_action, ExprValue::Action),
         map(parse_variable, ExprValue::Ident),
-        // map(parse_parens, ExprValue::Group),
+        map(parse_parens, ExprValue::Group),
+        //parse ExprValues to produce these:
         // map(parse_unary, ExprValue::Unary),
         // map(parse_binary, ExprValue::Binary),
     ))
     .parse(input)
 }
-fn parse_expression<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
-    input: &'i str,
-) -> IResult<&'i str, ExprValue<'i>, E> {
-    unimplemented!()
+///TODO: Transform to IResult
+fn parse_values<'i>(input: &'i str) -> Vec<ExprValue<'i>> {
+    let mut v = Vec::new();
+    let mut input = input;
+    loop {
+        let parsed = parse_value::<'i, ()>.parse(input);
+        if parsed.is_ok() {
+            let (tail, item) = parsed.unwrap();
+            v.push(item);
+            input = tail;
+        } else {
+            break;
+        }
+    } // end loop
+
+    v
 }
-//todo: order of operations, resort after parsed??
-//3+2*5
-//#+#*#
-//(3+2)*5
 
 #[test]
 fn test_value() {
-    let v = "sin";
+    let v = r##"3+2*5(f)"##;
     let (tail, expr) = parse_value::<()>.parse(v).unwrap();
     println!("tail: {:?}", tail);
     println!("expr: {:?}", expr);
+}
+#[test]
+fn test_values() {
+    let v = r##"3+2*5(f)"##;
+    let expr = parse_values(v);
+    println!("expr: {:?}", expr);
+    assert_eq!(expr.len(), 6);
 }
