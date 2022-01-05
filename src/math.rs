@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, collections::HashMap, num::ParseFloatError};
+use std::{borrow::Cow, cmp::Ordering, collections::HashMap, num::ParseFloatError, ops::RangeFrom};
 
 use nom::{
     branch::alt,
@@ -12,7 +12,7 @@ use nom::{
     multi,
     number::complete::double,
     sequence::{preceded, tuple},
-    IResult, Parser,
+    IResult, InputIter, Parser, Slice,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,13 +71,13 @@ impl Action {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum ExprValue<'i> {
+enum ExprValue {
     Number(f64),
-    Ident(&'i str),
+    Ident(String),
     Action(Action),
-    Group(Vec<ExprValue<'i>>),
-    Unary((Box<ExprValue<'i>>, Action)), //use this or group?
-    Binary((Box<ExprValue<'i>>, Box<ExprValue<'i>>, Action)),
+    Group(Vec<ExprValue>),
+    Unary((Box<ExprValue>, Action)), //use this or group?
+    Binary((Box<ExprValue>, Box<ExprValue>, Action)),
 }
 
 //Number
@@ -101,8 +101,8 @@ fn lex_subscript<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str,
     )))
     .parse(input)
 }
-fn lex_variable<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, &'i str, E> {
-    preceded(
+fn lex_variable<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, String, E> {
+    let p = preceded(
         multispace0,
         recognize(tuple((
             alt(
@@ -120,8 +120,8 @@ fn lex_variable<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, 
             ),
             opt(lex_subscript),
         ))),
-    )
-    .parse(input)
+    );
+    map(p, |v: &str| v.to_string()).parse(input)
 }
 //Action
 fn lex_action<'i, E: ParseError<&'i str>>(input: &'i str) -> IResult<&'i str, Action, E> {
@@ -176,7 +176,7 @@ fn lex_group<'i, T, E: ParseError<&'i str>, C>(
 }
 fn lex_parens<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
     input: &'i str,
-) -> IResult<&'i str, Vec<ExprValue<'i>>, E> {
+) -> IResult<&'i str, Vec<ExprValue>, E> {
     let group = lex_group('(', ')', lex_value, Vec::new, |mut col, val| {
         col.push(val);
         col
@@ -189,7 +189,7 @@ fn lex_parens<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloat
 //ExprValue
 fn lex_value<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatError>>(
     input: &'i str,
-) -> IResult<&'i str, ExprValue<'i>, E> {
+) -> IResult<&'i str, ExprValue, E> {
     alt((
         map(lex_action, ExprValue::Action),
         map(lex_number, ExprValue::Number),
@@ -203,11 +203,11 @@ fn lex_value<'i, E: ParseError<&'i str> + FromExternalError<&'i str, ParseFloatE
     .parse(input)
 }
 ///TODO: Transform to IResult
-fn lex_values<'i>(input: &'i str) -> Vec<ExprValue<'i>> {
+fn lex_values<'i>(input: &'i str) -> Vec<ExprValue> {
     let mut v = Vec::new();
     let mut input = input;
     loop {
-        let parsed = lex_value::<'i, ()>.parse(input);
+        let parsed = lex_value::<()>.parse(input);
         if parsed.is_ok() {
             let (tail, item) = parsed.unwrap();
             v.push(item);
@@ -230,41 +230,72 @@ fn variant_eq<T>(a: &T, b: &T) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-fn action_any<'i>(input: &'i [ExprValue<'i>]) -> IResult<&'i [ExprValue<'i>], ExprValue<'i>, ()> {
-    move |i: &'i [ExprValue<'i>]| match (i).iter_elements().next().map(|t| {
+fn action_any<'i>(
+    input: &'i [ExprValue],
+) -> impl Fn(&'i [ExprValue]) -> IResult<&'i [ExprValue], ExprValue, ()> {
+    move |i: &'i [ExprValue]| match (i).iter().next().map(|t| {
         let b = variant_eq(t, &ExprValue::Action(Action::Add));
-        (&t, b)
+        (t.clone(), b)
     }) {
-        Some((&t, b)) => Ok((i.slice(1..), t)),
+        Some((t, b)) => {
+            let (first, rest) = i.split_first().unwrap(); //TODO Better Test here, Test t == first
+            Ok((rest, t))
+        }
         _ => Err(nom::Err::Error(())),
     }
 }
-// fn action_specific<'i>(
-//     input: &'i [ExprValue<'i>],
-//     action: Action,
-// ) -> IResult<&'i [ExprValue<'i>], ExprValue<'i>, ()> {
-//     move |i: &'i [ExprValue<'i>]| match (i).iter_elements().next().map(|t| {
-//         let b = t == &ExprValue::Action(action);
-//         (&t, b)
-//     }) {
-//         Some((&t, b)) => Ok((i.slice(1..), t)),
-//         _ => Err(nom::Err::Error(())),
-//     }
-// }
-
-fn insert_negate<'i>(
-    input: &'i [ExprValue<'i>],
-) -> IResult<&'i [ExprValue<'i>], ExprValue<'i>, ()> {
-    // let sub = |t: &ExprValue| return t == &ExprValue::Action(Action::Subtract);
-    // let double_action = |a: &ExprValue, s: &ExprValue| return variant_eq(a, s);
-    let mut is_action = |e: &ExprValue| return variant_eq(e, &ExprValue::Action(Action::Add));
-
-    // preceded(, second)
-    unimplemented!()
+fn action_specific<'i, E>(
+    action: &'i Action,
+) -> impl Fn(&'i [ExprValue]) -> IResult<&'i [ExprValue], ExprValue, ()> {
+    move |i: &'i [ExprValue]| match (i).iter().next().map(|t| {
+        let b = t == &ExprValue::Action(action.clone());
+        (t.clone(), b)
+    }) {
+        Some((t, b)) => {
+            let (first, rest) = i.split_first().unwrap(); //TODO Better Test here, Test t == first
+            Ok((rest, t))
+        }
+        _ => Err(nom::Err::Error(())),
+    }
 }
 
-fn modify_tokens<'i>(mut tokens: Vec<ExprValue<'i>>) -> Vec<ExprValue<'i>> {
+fn actor_any<'i>() -> impl Fn(&'i [ExprValue]) -> IResult<&'i [ExprValue], ExprValue, ()> {
+    //
+    move |i: &'i [ExprValue]| {
+        match (i)
+            .iter()
+            .next()
+            .map(|t| (t.clone(), variant_eq(t, &ExprValue::Group(Vec::new()))))
+        {
+            Some((t, b)) => {
+                let (first, rest) = i.split_first().unwrap(); //TODO Better Test here, Test t == first
+                Ok((rest, t))
+            }
+            _ => Err(nom::Err::Error(())),
+        }
+    }
+}
+
+fn insert_negate(input: &[ExprValue]) -> IResult<&[ExprValue], ExprValue, ()> {
+    let ii = actor_any.parse(input);
+
+    unimplemented!()
+    // preceded(
+    //     actor_any,
+    //     preceded(
+    //         action_any,
+    //         tuple((action_specific(Action::Subtract), actor_any)),
+    //     ),
+    // )
+    // .parse(input)
+
+    // preceded(, second)
+    // unimplemented!()
+}
+
+fn modify_tokens(mut tokens: Vec<ExprValue>) -> Vec<ExprValue> {
     let tslice = &tokens[..];
+
     // let res = insert_negate.parse(tslice);
     let res = insert_negate.parse(tslice);
     tokens
